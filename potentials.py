@@ -14,16 +14,17 @@ class HarmonicPotential:
         return 0.5 * self.k * jnp.sum((r - self.r0) ** 2)
 
 
-def lennard_jones_potential(positions, neighbor_list, box, eps=1.0, sigma=1.0):
+def lennard_jones_potential(positions, neighbor_list, box, eps=1.0, sigma=1.0, r_cut=None):
     dr, dist, mask = pair_distances(positions, neighbor_list, box)
 
-    safe_dist = jnp.where(mask, jnp.maximum(dist, 1e-12), 1.0)
+    interaction_mask = mask if r_cut is None else (mask & (dist < r_cut))
+    safe_dist = jnp.where(interaction_mask, jnp.maximum(dist, 1e-12), 1.0)
 
     sr6 = (sigma / safe_dist) ** 6
     sr12 = sr6 ** 2
     pair_energy = 4.0 * eps * (sr12 - sr6)
 
-    pair_energy = jnp.where(mask, pair_energy, 0.0)
+    pair_energy = jnp.where(interaction_mask, pair_energy, 0.0)
 
     return 0.5 * jnp.sum(pair_energy)
 

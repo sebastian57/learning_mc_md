@@ -1,0 +1,92 @@
+from pathlib import Path
+import re
+
+import matplotlib.pyplot as plt
+
+
+def _slugify(value, fallback="plot"):
+    text = str(value).strip().lower()
+    text = text.replace(" ", "_")
+    text = re.sub(r"[^a-zA-Z0-9._-]+", "_", text)
+    text = text.strip("._-")
+    return text or fallback
+
+
+def plot_xy(
+    x,
+    y,
+    xlabel="x",
+    ylabel="y",
+    title=None,
+    name="default",
+    save=False,
+    plots_dir="plots",
+    show=True,
+    ax=None,
+    save_format="png",
+    tight_layout=True,
+    **plot_kwargs,
+):
+    """Plot x/y data with simple defaults and pass-through Matplotlib options.
+
+    Parameters
+    ----------
+    x, y : array-like
+        Data to plot.
+    xlabel, ylabel : str
+        Axis labels. Default to "x" and "y".
+    title : str or None
+        Plot title. If None, no title is set.
+    name : str
+        Subdirectory name under plots/ when save=True.
+    save : bool
+        If True, save the figure to plots/<name>/<title-with-spaces-replaced>.<ext>.
+    plots_dir : str or Path
+        Root directory for saved plots.
+    show : bool
+        If True, call plt.show().
+    ax : matplotlib.axes.Axes or None
+        Existing axes to draw on. If None, create a new figure and axes.
+    save_format : str
+        File extension used when saving.
+    tight_layout : bool
+        If True, apply tight_layout() before showing/saving.
+    **plot_kwargs
+        Forwarded directly to ax.plot(...), e.g. color, linewidth, marker, alpha.
+
+    Returns
+    -------
+    (fig, ax, save_path)
+        save_path is None when save=False.
+    """
+    created_figure = ax is None
+    if created_figure:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+
+    if x == None:
+        ax.plot(y, **plot_kwargs)
+    else:
+        ax.plot(x, y, **plot_kwargs)
+        
+    ax.set_xlabel(xlabel or "x")
+    ax.set_ylabel(ylabel or "y")
+    if title is not None:
+        ax.set_title(title)
+
+    if tight_layout:
+        fig.tight_layout()
+
+    save_path = None
+    if save:
+        title_slug = _slugify(title if title else "plot")
+        plot_dir = Path(plots_dir) / _slugify(name, fallback="default")
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        save_path = plot_dir / f"{title_slug}.{save_format.lstrip('.')}"
+        fig.savefig(save_path, bbox_inches="tight")
+
+    if show:
+        plt.show()
+
+    return fig, ax, save_path
