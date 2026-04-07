@@ -197,6 +197,21 @@ class MD:
         dof = max(1, 3 * n_particles - 3)
         return 2.0 * self._kinetic_energy(velocities) / dof
 
+    def _wrap_positions(self, positions):
+        if not self.neighbor_list_pbc or self.box is None:
+            return positions
+
+        box = jnp.asarray(self.box, dtype=positions.dtype)
+        if box.ndim == 1:
+            return positions - box * jnp.floor(positions / box)
+        if box.shape == (3, 3):
+            inv_box = jnp.linalg.inv(box)
+            fractional = jnp.einsum("...i,ij->...j", positions, inv_box)
+            fractional = fractional - jnp.floor(fractional)
+            return jnp.einsum("...i,ij->...j", fractional, box)
+
+        raise ValueError(f"Expected box shape (3,) or (3, 3), got {box.shape}.")
+
     # ------------------------------------------------------------------
     # Internal step (built once, reused across chunks)
     # ------------------------------------------------------------------
@@ -282,6 +297,16 @@ class MD:
 
         return energy_force_fn
 
+    def _compute_initial_acceleration(self, positions):
+        wrapped_positions = self._wrap_positions(positions)
+        if self.neighbor_list_mode == "none":
+            neighbor_list = None
+        else:
+            neighbor_list = self._update_neighbor_list(wrapped_positions, force=True)
+        energy_force_fn = self._build_energy_force_fn(neighbor_list)
+        _, force = energy_force_fn(wrapped_positions)
+        return wrapped_positions, force / self.m
+
     def _build_step_fn(self, neighbor_list=None):
         energy_force_fn = self._build_energy_force_fn(neighbor_list)
         dt, m = self.dt, self.m
@@ -290,6 +315,7 @@ class MD:
         def step(carry, _):
             r, v, a = carry
             r_ = r + v * dt + 0.5 * a * dt ** 2
+            r_ = self._wrap_positions(r_)
             energy_, force_ = energy_force_fn(r_)
             a_ = force_ / m
             v_ = v + 0.5 * (a + a_) * dt
@@ -317,6 +343,8 @@ class MD:
                       smaller values give finer progress updates at higher overhead.
         progress_backend : one of "auto", "notebook", "terminal", or "none".
         """
+        self.r, self.a = self._compute_initial_acceleration(self.r)
+
         if self.neighbor_list_mode == "none":
             step = self._build_step_fn()
 
