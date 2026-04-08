@@ -165,6 +165,7 @@ class MD:
         self.neighbor_list = None
         self.reference_positions = None
         self.trajectory = None
+        self.r_unwrapped = jnp.array(self.r)
 
     @staticmethod
     def initialize_velocities(
@@ -313,15 +314,34 @@ class MD:
 
         @jax.jit
         def step(carry, _):
-            r, v, a = carry
-            r_ = r + v * dt + 0.5 * a * dt ** 2
-            r_ = self._wrap_positions(r_)
+            r, r_unwrapped, v, a = carry
+            raw_r_ = r + v * dt + 0.5 * a * dt ** 2
+            r_ = self._wrap_positions(raw_r_)
+            if self.neighbor_list_pbc and self.box is not None:
+                dr = minimum_image(r_ - r, box=self.box)
+            else:
+                dr = raw_r_ - r
+            r_unwrapped_ = r_unwrapped + dr
             energy_, force_ = energy_force_fn(r_)
             a_ = force_ / m
             v_ = v + 0.5 * (a + a_) * dt
             kinetic_energy_ = self._kinetic_energy(v_)
             temperature_ = self._temperature(v_)
-            return (r_, v_, a_), (r_, v_, a_, force_, energy_, kinetic_energy_, temperature_)
+            return (
+                r_,
+                r_unwrapped_,
+                v_,
+                a_,
+            ), (
+                r_,
+                r_unwrapped_,
+                v_,
+                a_,
+                force_,
+                energy_,
+                kinetic_energy_,
+                temperature_,
+            )
 
         return step
 
@@ -344,17 +364,19 @@ class MD:
         progress_backend : one of "auto", "notebook", "terminal", or "none".
         """
         self.r, self.a = self._compute_initial_acceleration(self.r)
+        self.r_unwrapped = jnp.array(self.r)
 
         if self.neighbor_list_mode == "none":
             step = self._build_step_fn()
 
             if performance:
-                (r_f, v_f, a_f), (r_t, v_t, a_t, f_t, e_t, ke_t, temp_t) = jax.lax.scan(
-                    step, (self.r, self.v, self.a), None, length=n_steps
+                (r_f, r_u_f, v_f, a_f), (r_t, r_u_t, v_t, a_t, f_t, e_t, ke_t, temp_t) = jax.lax.scan(
+                    step, (self.r, self.r_unwrapped, self.v, self.a), None, length=n_steps
                 )
-                self.r, self.v, self.a = r_f, v_f, a_f
+                self.r, self.r_unwrapped, self.v, self.a = r_f, r_u_f, v_f, a_f
                 self.trajectory = {
                     "positions":     np.array(r_t),
+                    "unwrapped_positions": np.array(r_u_t),
                     "velocities":    np.array(v_t),
                     "accelerations": np.array(a_t),
                     "forces":        np.array(f_t),
@@ -368,8 +390,8 @@ class MD:
                 if remainder:
                     chunk_sizes.append(remainder)
 
-                carry = (self.r, self.v, self.a)
-                all_r, all_v, all_a, all_f, all_e, all_ke, all_temp = [], [], [], [], [], [], []
+                carry = (self.r, self.r_unwrapped, self.v, self.a)
+                all_r, all_ru, all_v, all_a, all_f, all_e, all_ke, all_temp = [], [], [], [], [], [], [], []
 
                 bar = _make_progress_bar(
                     total=len(chunk_sizes),
@@ -379,11 +401,12 @@ class MD:
 
                 try:
                     for idx, cs in enumerate(chunk_sizes, start=1):
-                        carry, (r_chunk, v_chunk, a_chunk, f_chunk, e_chunk, ke_chunk, temp_chunk) = jax.lax.scan(
+                        carry, (r_chunk, ru_chunk, v_chunk, a_chunk, f_chunk, e_chunk, ke_chunk, temp_chunk) = jax.lax.scan(
                             step, carry, None, length=cs
                         )
                         jax.block_until_ready(carry)
                         all_r.append(np.array(r_chunk))
+                        all_ru.append(np.array(ru_chunk))
                         all_v.append(np.array(v_chunk))
                         all_a.append(np.array(a_chunk))
                         all_f.append(np.array(f_chunk))
@@ -398,9 +421,10 @@ class MD:
                     if bar is not None:
                         bar.close()
 
-                self.r, self.v, self.a = carry
+                self.r, self.r_unwrapped, self.v, self.a = carry
                 self.trajectory = {
                     "positions":     np.concatenate(all_r, axis=0),
+                    "unwrapped_positions": np.concatenate(all_ru, axis=0),
                     "velocities":    np.concatenate(all_v, axis=0),
                     "accelerations": np.concatenate(all_a, axis=0),
                     "forces":        np.concatenate(all_f, axis=0),
@@ -418,8 +442,8 @@ class MD:
         if remainder:
             chunk_sizes.append(remainder)
 
-        carry = (self.r, self.v, self.a)
-        all_r, all_v, all_a, all_f, all_e, all_ke, all_temp = [], [], [], [], [], [], []
+        carry = (self.r, self.r_unwrapped, self.v, self.a)
+        all_r, all_ru, all_v, all_a, all_f, all_e, all_ke, all_temp = [], [], [], [], [], [], [], []
 
         bar = _make_progress_bar(
             total=len(chunk_sizes),
@@ -431,14 +455,15 @@ class MD:
 
         try:
             for idx, cs in enumerate(chunk_sizes, start=1):
-                current_r, _, _ = carry
+                current_r, _, _, _ = carry
                 neighbor_list = self._update_neighbor_list(current_r)
                 step = self._build_step_fn(neighbor_list)
-                carry, (r_chunk, v_chunk, a_chunk, f_chunk, e_chunk, ke_chunk, temp_chunk) = jax.lax.scan(
+                carry, (r_chunk, ru_chunk, v_chunk, a_chunk, f_chunk, e_chunk, ke_chunk, temp_chunk) = jax.lax.scan(
                     step, carry, None, length=cs
                 )
                 jax.block_until_ready(carry)
                 all_r.append(np.array(r_chunk))
+                all_ru.append(np.array(ru_chunk))
                 all_v.append(np.array(v_chunk))
                 all_a.append(np.array(a_chunk))
                 all_f.append(np.array(f_chunk))
@@ -453,9 +478,10 @@ class MD:
             if bar is not None:
                 bar.close()
 
-        self.r, self.v, self.a = carry
+        self.r, self.r_unwrapped, self.v, self.a = carry
         self.trajectory = {
             "positions":     np.concatenate(all_r, axis=0),
+            "unwrapped_positions": np.concatenate(all_ru, axis=0),
             "velocities":    np.concatenate(all_v, axis=0),
             "accelerations": np.concatenate(all_a, axis=0),
             "forces":        np.concatenate(all_f, axis=0),

@@ -1,3 +1,4 @@
+import numpy as np
 import jax.numpy as jnp
 
 
@@ -213,3 +214,89 @@ def pair_distances(positions, neighbor_list, box=None):
     dr = jnp.where(mask[..., None], raw_dr, 0.0)
     dist = jnp.where(mask, dist, 0.0)
     return dr, dist, mask
+
+
+def create_fluid_structure(
+    density,
+    num_atoms,
+    dim=3,
+    seed=0,
+    min_distance=None,
+    max_attempts_per_atom=2000,
+    dtype=jnp.float32,
+):
+    """Create a random non-overlapping fluid-like structure at a target density.
+
+    Parameters
+    ----------
+    density : float
+        Number density N / V in reduced units.
+    num_atoms : int
+        Number of atoms to place.
+    dim : int
+        Spatial dimension. The MD engine currently expects dim=3.
+    seed : int
+        Random seed for reproducible placement.
+    min_distance : float or None
+        Minimum allowed pair distance. If None, a heuristic based on density
+        is used: 0.8 * density**(-1/3) in 3D.
+    max_attempts_per_atom : int
+        Rejection-sampling attempts per atom before giving up.
+    dtype : jax dtype
+        Output dtype for positions and box.
+
+    Returns
+    -------
+    positions, box
+        positions has shape (num_atoms, dim), box has shape (dim,).
+
+    Notes
+    -----
+    This creates a random fluid-like starting geometry, not an equilibrated
+    liquid. At high density it is best used as a starting point for MD
+    equilibration.
+    """
+    if density <= 0:
+        raise ValueError("density must be positive.")
+    if num_atoms <= 0:
+        raise ValueError("num_atoms must be positive.")
+    if dim <= 0:
+        raise ValueError("dim must be positive.")
+
+    box_length = (float(num_atoms) / float(density)) ** (1.0 / float(dim))
+    box = np.full(dim, box_length, dtype=np.float64)
+
+    if min_distance is None:
+        if dim == 3:
+            min_distance = 0.8 * density ** (-1.0 / 3.0)
+        else:
+            min_distance = 0.8 * density ** (-1.0 / float(dim))
+
+    rng = np.random.default_rng(seed)
+    positions = np.empty((num_atoms, dim), dtype=np.float64)
+
+    for i in range(num_atoms):
+        placed = False
+        for _ in range(max_attempts_per_atom):
+            candidate = rng.uniform(0.0, box_length, size=dim)
+            if i == 0:
+                positions[i] = candidate
+                placed = True
+                break
+
+            dr = candidate - positions[:i]
+            dr = dr - box * np.round(dr / box)
+            dist = np.linalg.norm(dr, axis=-1)
+
+            if np.all(dist >= min_distance):
+                positions[i] = candidate
+                placed = True
+                break
+
+        if not placed:
+            raise ValueError(
+                "Could not place all atoms without overlap. Try lowering density "
+                "or reducing min_distance."
+            )
+
+    return jnp.array(positions, dtype=dtype), jnp.array(box, dtype=dtype)
